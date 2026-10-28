@@ -15,6 +15,7 @@ import {
 	AgentClientMessageSchema,
 	AgentServerMessageSchema,
 	AgentStoreConflictArgsSchema,
+	BackgroundShellSpawnArgsSchema,
 	CanvasDiagnosticsArgsSchema,
 	ComputerUseArgsSchema,
 	ConnectScmArgsSchema,
@@ -2490,5 +2491,100 @@ describe("Cursor exec answers: what the result claims about the work", () => {
 		const text = results[0].content.map(part => (part.type === "text" ? part.text : "")).join("");
 		expect(text).toBe("No MCP resources available");
 		expect(results[0].isError).toBe(false);
+	});
+});
+
+describe("Cursor native background Shell and Task", () => {
+	const backgroundShell = buildExecMessage({
+		case: "backgroundShellSpawnArgs",
+		value: create(BackgroundShellSpawnArgsSchema, {
+			command: "bun run dev",
+			workingDirectory: "/repo",
+			toolCallId: "bg-call",
+		}),
+	});
+	const subagent = buildExecMessage({
+		case: "subagentArgs",
+		value: create(SubagentArgsSchema, {
+			toolCallId: "task-call",
+			subagentType: "explore",
+			prompt: "Map the auth flow",
+		}),
+	});
+
+	it("answers a background shell with the numeric id of the host's job", async () => {
+		// Cursor polls and kills the shell by `shell_id`; the host's job is `bg_7`.
+		const { frames, output } = await dispatchExec(backgroundShell, {
+			execHandlers: {
+				async backgroundShell() {
+					return toolResult("Started bg_7", { details: { async: { jobId: "bg_7" } } });
+				},
+			},
+		});
+
+		const answer = soleResult(frames);
+		if (answer.case !== "backgroundShellSpawnResult" || answer.value.result.case !== "success")
+			throw new Error("expected background shell success");
+		expect(answer.value.result.value).toMatchObject({
+			shellId: 7,
+			command: "bun run dev",
+			workingDirectory: "/repo",
+		});
+		const call = output.content.find(block => block.type === "toolCall");
+		expect(call).toMatchObject({ name: "bash", arguments: { command: "bun run dev", async: true } });
+	});
+
+	it("reports a background shell that never became a job as a spawn error", async () => {
+		const { frames } = await dispatchExec(backgroundShell, {
+			execHandlers: {
+				async backgroundShell() {
+					return toolResult("Background job limit reached", { isError: true });
+				},
+			},
+		});
+
+		const answer = soleResult(frames);
+		if (answer.case !== "backgroundShellSpawnResult" || answer.value.result.case !== "error")
+			throw new Error("expected background shell error");
+		expect(answer.value.result.value.error).toBe("Background job limit reached");
+	});
+
+	it("still rejects a background shell when the host has no handler", async () => {
+		const answer = soleResult((await dispatchExec(backgroundShell)).frames);
+		if (answer.case !== "backgroundShellSpawnResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("rejected");
+	});
+
+	it("answers a Task with the subagent's final report", async () => {
+		const { frames } = await dispatchExec(subagent, {
+			execHandlers: {
+				async subagent(args) {
+					return toolResult(`report for: ${args.prompt}`, { details: { agentId: "0-CursorTask" } });
+				},
+			},
+		});
+
+		const answer = soleResult(frames);
+		if (answer.case !== "subagentResult" || answer.value.result.case !== "success")
+			throw new Error("expected subagent success");
+		expect(answer.value.result.value).toMatchObject({
+			agentId: "0-CursorTask",
+			finalMessage: "report for: Map the auth flow",
+		});
+	});
+
+	it("answers a failed Task with a subagent error carrying its text", async () => {
+		const { frames } = await dispatchExec(subagent, {
+			execHandlers: {
+				async subagent() {
+					return toolResult("Subagent aborted", { isError: true });
+				},
+			},
+		});
+
+		const answer = soleResult(frames);
+		if (answer.case !== "subagentResult" || answer.value.result.case !== "error")
+			throw new Error("expected subagent error");
+		expect(answer.value.result.value.error).toBe("Subagent aborted");
 	});
 });

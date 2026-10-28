@@ -24,6 +24,7 @@ import {
 	ShellArgsSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, fromBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
 import { registerArtifactsDir } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
@@ -2462,5 +2463,84 @@ describe("CursorExecHandlers passive tool context", () => {
 			// The carrier is symbol-keyed and never reaches serialized history.
 			expect(JSON.stringify(result)).not.toContain("tool context");
 		}
+	});
+});
+
+describe("CursorExecHandlers native Task bridge", () => {
+	const spawnSchema = type({ name: "string", agent: "string", task: "string", solutionSpace: "string" });
+
+	/** A `task` tool that registers a real async job settled by `run`. */
+	function asyncTaskBridge(parameters: AgentTool["parameters"], run: () => Promise<string>) {
+		const manager = new AsyncJobManager({});
+		const calls: unknown[] = [];
+		const tool: AgentTool = {
+			name: "task",
+			label: "Task",
+			description: "Spawns a subagent job",
+			parameters,
+			async execute(_id, args) {
+				calls.push(args);
+				const jobId = manager.register("task", "CursorTask", run);
+				return { content: [{ type: "text", text: `Started ${jobId}` }], details: { async: { jobId } } };
+			},
+		};
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map([[tool.name, tool]]),
+			getAsyncJobManager: () => manager,
+		});
+		return { handlers, manager, calls };
+	}
+
+	it("answers with the subagent's report and keeps it from auto-delivering again", async () => {
+		// Cursor's Task waits for the report in band. Left unconsumed, the job
+		// result would also reach the model as a follow-up turn.
+		const { handlers, manager, calls } = asyncTaskBridge(spawnSchema, async () => "auth lives in src/auth");
+
+		const result = await handlers.subagent({
+			toolCallId: "t1",
+			subagentType: "explore",
+			prompt: "Map the auth flow",
+		} as never);
+
+		expect(result.isError).toBe(false);
+		expect(result.content.map(part => (part.type === "text" ? part.text : "")).join("")).toBe(
+			"auth lives in src/auth",
+		);
+		expect(calls[0]).toMatchObject({ agent: "scout", task: "Map the auth flow" });
+		const details = result.details;
+		const agentId = details && typeof details === "object" && "agentId" in details ? details.agentId : undefined;
+		if (typeof agentId !== "string") throw new Error("expected the subagent job id as agentId");
+		expect(manager.getJob(agentId)?.status).toBe("completed");
+		expect(manager.isJobResultConsumed(agentId)).toBe(true);
+	});
+
+	it("answers a failed subagent job as an error with its message", async () => {
+		const { handlers } = asyncTaskBridge(spawnSchema, async () => {
+			throw new Error("subagent crashed");
+		});
+
+		const result = await handlers.subagent({
+			toolCallId: "t2",
+			subagentType: "generalPurpose",
+			prompt: "Fix the build",
+		} as never);
+
+		expect(result.isError).toBe(true);
+		expect(result.content.map(part => (part.type === "text" ? part.text : "")).join("")).toBe("subagent crashed");
+	});
+
+	it("wraps the spawn in a batch envelope when the task schema requires one", async () => {
+		const batchSchema = type({ context: "string", tasks: spawnSchema.array() });
+		const { handlers, calls } = asyncTaskBridge(batchSchema, async () => "done");
+
+		const result = await handlers.subagent({
+			toolCallId: "t3",
+			subagentType: "explore",
+			prompt: "Map the auth flow",
+		} as never);
+
+		expect(result.isError).toBe(false);
+		expect(calls[0]).toMatchObject({ context: "", tasks: [{ agent: "scout", task: "Map the auth flow" }] });
 	});
 });
