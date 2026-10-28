@@ -33,7 +33,7 @@ import {
 	piTimeout,
 	shellDeadlineSeconds,
 } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "./async";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
 import type { MCPResourceReadResult } from "./mcp/types";
@@ -690,7 +690,8 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			solutionSpace: "As the task prompt specifies.",
 		};
 		const spawned = await executeTool(this.options, toolName, toolCallId, taskToolArgs(tool, toolCallId, item));
-		const jobId = (spawned.details as { async?: { jobId?: unknown } } | undefined)?.async?.jobId;
+		const asyncInfo = isRecord(spawned.details) ? spawned.details.async : undefined;
+		const jobId = isRecord(asyncInfo) ? asyncInfo.jobId : undefined;
 		const manager = this.options.getAsyncJobManager?.();
 		const job = typeof jobId === "string" ? manager?.getJob(jobId) : undefined;
 		if (spawned.isError || !manager || !job) return spawned;

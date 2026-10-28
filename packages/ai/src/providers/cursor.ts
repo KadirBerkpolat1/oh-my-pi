@@ -3975,8 +3975,8 @@ function buildBackgroundShellResultFromToolResult(
 	toolResult: ToolResultMessage,
 ) {
 	const text = toolResultToText(toolResult);
-	const details = toolResult.details as { async?: { jobId?: unknown } } | undefined;
-	const jobId = typeof details?.async?.jobId === "string" ? details.async.jobId : undefined;
+	const asyncInfo = isRecord(toolResult.details) ? toolResult.details.async : undefined;
+	const jobId = isRecord(asyncInfo) && typeof asyncInfo.jobId === "string" ? asyncInfo.jobId : undefined;
 	const shellId = jobId ? Number.parseInt(jobId.replace(/^\D+/, ""), 10) : Number.NaN;
 	if (toolResult.isError || !Number.isFinite(shellId)) {
 		return buildBackgroundShellErrorResult(command, workingDirectory, text || "Background shell failed to start");
@@ -3998,12 +3998,12 @@ function buildSubagentErrorResult(error: string) {
 function buildSubagentResultFromToolResult(toolResult: ToolResultMessage) {
 	const text = toolResultToText(toolResult);
 	if (toolResult.isError) return buildSubagentErrorResult(text || "Subagent failed");
-	const details = toolResult.details as { agentId?: unknown } | undefined;
+	const agentId = isRecord(toolResult.details) ? toolResult.details.agentId : undefined;
 	return create(SubagentResultSchema, {
 		result: {
 			case: "success",
 			value: create(SubagentSuccessSchema, {
-				agentId: typeof details?.agentId === "string" ? details.agentId : toolResult.toolCallId,
+				agentId: typeof agentId === "string" ? agentId : toolResult.toolCallId,
 				finalMessage: text,
 				toolCallCount: 0,
 			}),
