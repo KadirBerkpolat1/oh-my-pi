@@ -3923,6 +3923,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getEditReplaceTool: getCursorBridgeEditTool,
 			getToolContext: () => toolContextStore.getContext(),
 			mcpResources: cursorMcpResources,
+			getAsyncJobManager: () => scopedAsyncJobManager,
 			emitEvent: event => cursorEventEmitter?.(event),
 			getTodoPhases: () => session.getTodoPhases(),
 			setTodoPhases: phases => session.setTodoPhases(phases),

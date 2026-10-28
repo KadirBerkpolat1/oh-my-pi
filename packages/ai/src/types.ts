@@ -4,6 +4,7 @@ export * from "@oh-my-pi/pi-catalog/types";
 import type { Type } from "@oh-my-pi/omptype";
 import type { AnthropicSlowModeHooks } from "./providers/anthropic-slow-mode";
 import type {
+	BackgroundShellSpawnArgs,
 	DeleteArgs,
 	DeleteResult,
 	DiagnosticsArgs,
@@ -31,6 +32,7 @@ import type {
 	ReadResult,
 	ShellArgs,
 	ShellResult,
+	SubagentArgs,
 	WriteArgs,
 	WriteResult,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
@@ -1529,6 +1531,17 @@ export interface CursorExecHandlers {
 		args: ShellArgs,
 		callbacks: CursorShellStreamCallbacks,
 	) => Promise<CursorExecHandlerResult<ShellResult>>;
+	/**
+	 * Cursor's Shell with `block_until_ms: 0`. Answered with a tool result whose
+	 * `details.async.jobId` names the host's background job; the provider maps it
+	 * to Cursor's numeric `shell_id`.
+	 */
+	backgroundShell?: (args: BackgroundShellSpawnArgs) => Promise<ToolResultMessage>;
+	/**
+	 * Cursor's native Task tool. Answered with the subagent's final report as the
+	 * tool result text; `isError` maps to `SubagentError`.
+	 */
+	subagent?: (args: SubagentArgs) => Promise<ToolResultMessage>;
 	diagnostics?: (args: DiagnosticsArgs) => Promise<CursorExecHandlerResult<DiagnosticsResult>>;
 	mcp?: (call: CursorMcpCall) => Promise<CursorExecHandlerResult<McpResult>>;
 	/**

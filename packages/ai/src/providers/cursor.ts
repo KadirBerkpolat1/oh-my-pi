@@ -28,7 +28,9 @@ import {
 	AssistantMessageSchema,
 	BidiAppendRequestSchema,
 	BidiRequestIdSchema,
+	BackgroundShellSpawnErrorSchema,
 	BackgroundShellSpawnResultSchema,
+	BackgroundShellSpawnSuccessSchema,
 	CanvasDiagnosticsErrorSchema,
 	CanvasDiagnosticsResultSchema,
 	ClientHeartbeatSchema,
@@ -149,6 +151,7 @@ import {
 	SubagentAwaitResultSchema,
 	SubagentErrorSchema,
 	SubagentResultSchema,
+	SubagentSuccessSchema,
 	ThinkingMessageSchema,
 	ToolCallSchema,
 	type TurnEndedUpdate,
@@ -2709,17 +2712,33 @@ async function handleExecServerMessage(
 		}
 		case "backgroundShellSpawnArgs": {
 			const args = execMsg.message.value;
-			const execResult = create(BackgroundShellSpawnResultSchema, {
-				result: {
-					case: "rejected",
-					value: create(ShellRejectedSchema, {
-						command: args.command,
-						workingDirectory: args.workingDirectory,
-						reason: "Not implemented",
-						isReadonly: false,
-					}),
-				},
+			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
+			const workingDirectory = args.workingDirectory || process.cwd();
+			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "bash", {
+				command: args.command,
+				cwd: args.workingDirectory || undefined,
+				async: true,
 			});
+			const { execResult } = await resolveExecHandler(
+				args,
+				execHandlers?.backgroundShell?.bind(execHandlers),
+				onToolResult,
+				toolResult => buildBackgroundShellResultFromToolResult(args.command, workingDirectory, toolResult),
+				reason =>
+					create(BackgroundShellSpawnResultSchema, {
+						result: {
+							case: "rejected",
+							value: create(ShellRejectedSchema, {
+								command: args.command,
+								workingDirectory,
+								reason,
+								isReadonly: false,
+							}),
+						},
+					}),
+				error => buildBackgroundShellErrorResult(args.command, workingDirectory, error),
+				{ toolCallId: args.toolCallId, toolName: "bash" },
+			);
 			sendExecClientMessage(runTransport, execMsg, "backgroundShellSpawnResult", execResult);
 			return;
 		}
@@ -3235,13 +3254,18 @@ async function handleExecServerMessage(
 		}
 		case "subagentArgs": {
 			const args = execMsg.message.value;
-			const execResult = create(SubagentResultSchema, {
-				result: {
-					case: "error",
-					value: create(SubagentErrorSchema, { error: `Subagents are ${NOT_IMPLEMENTED_SUFFIX}` }),
-				},
-			});
-			log("exec", "subagentRejected", { subagentType: args.subagentType });
+			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
+			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "task", { task: args.prompt });
+			const { execResult } = await resolveExecHandler(
+				args,
+				execHandlers?.subagent?.bind(execHandlers),
+				onToolResult,
+				buildSubagentResultFromToolResult,
+				reason => buildSubagentErrorResult(`Subagents are unavailable: ${reason}`),
+				buildSubagentErrorResult,
+				{ toolCallId: args.toolCallId, toolName: "task" },
+			);
+			log("exec", "subagent", { subagentType: args.subagentType, case: execResult.result.case });
 			sendExecClientMessage(runTransport, execMsg, "subagentResult", execResult);
 			return;
 		}
@@ -3927,6 +3951,61 @@ function buildShellFailureResult(command: string, workingDirectory: string, erro
 				stderr: error,
 				executionTime: 0,
 				aborted: false,
+			}),
+		},
+	});
+}
+
+function buildBackgroundShellErrorResult(command: string, workingDirectory: string, error: string) {
+	return create(BackgroundShellSpawnResultSchema, {
+		result: {
+			case: "error",
+			value: create(BackgroundShellSpawnErrorSchema, { command, workingDirectory, error }),
+		},
+	});
+}
+
+/**
+ * Cursor identifies a background shell by a numeric `shell_id`; the host names
+ * its job `bg_<n>`. The numeric suffix is unique per session, so it is the id.
+ */
+function buildBackgroundShellResultFromToolResult(
+	command: string,
+	workingDirectory: string,
+	toolResult: ToolResultMessage,
+) {
+	const text = toolResultToText(toolResult);
+	const details = toolResult.details as { async?: { jobId?: unknown } } | undefined;
+	const jobId = typeof details?.async?.jobId === "string" ? details.async.jobId : undefined;
+	const shellId = jobId ? Number.parseInt(jobId.replace(/^\D+/, ""), 10) : Number.NaN;
+	if (toolResult.isError || !Number.isFinite(shellId)) {
+		return buildBackgroundShellErrorResult(command, workingDirectory, text || "Background shell failed to start");
+	}
+	return create(BackgroundShellSpawnResultSchema, {
+		result: {
+			case: "success",
+			value: create(BackgroundShellSpawnSuccessSchema, { shellId, command, workingDirectory }),
+		},
+	});
+}
+
+function buildSubagentErrorResult(error: string) {
+	return create(SubagentResultSchema, {
+		result: { case: "error", value: create(SubagentErrorSchema, { error }) },
+	});
+}
+
+function buildSubagentResultFromToolResult(toolResult: ToolResultMessage) {
+	const text = toolResultToText(toolResult);
+	if (toolResult.isError) return buildSubagentErrorResult(text || "Subagent failed");
+	const details = toolResult.details as { agentId?: unknown } | undefined;
+	return create(SubagentResultSchema, {
+		result: {
+			case: "success",
+			value: create(SubagentSuccessSchema, {
+				agentId: typeof details?.agentId === "string" ? details.agentId : toolResult.toolCallId,
+				finalMessage: text,
+				toolCallCount: 0,
 			}),
 		},
 	});

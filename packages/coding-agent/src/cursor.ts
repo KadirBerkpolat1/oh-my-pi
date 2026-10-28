@@ -34,6 +34,7 @@ import {
 	shellDeadlineSeconds,
 } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import type { AsyncJobManager } from "./async";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
 import type { MCPResourceReadResult } from "./mcp/types";
 import {
@@ -158,6 +159,12 @@ interface CursorExecBridgeOptions {
 	 * which is indistinguishable from a server that advertises nothing.
 	 */
 	mcpResources?: CursorMcpResourceAdapter;
+	/**
+	 * The session's background job manager. Cursor's Task waits for the
+	 * subagent's report in band, so the bridge awaits the `task` job it spawns
+	 * and consumes its result instead of letting it auto-deliver a second time.
+	 */
+	getAsyncJobManager?: () => AsyncJobManager | undefined;
 }
 
 /**
@@ -297,6 +304,25 @@ function buildUnavailableToolResult(
 		`Tool "${toolName}" not available to this agent; calling it again fails the same way. Use one of: ${shown}${extra}.`,
 	);
 	return createToolResultMessage(toolCallId, toolName, result, true);
+}
+
+/** Cursor's Task `subagent_type` → bundled omp agent; anything unlisted runs as `task`. */
+const CURSOR_SUBAGENT_AGENTS: Record<string, string> = {
+	explore: "scout",
+	generalPurpose: "task",
+};
+
+/**
+ * The `task` tool takes either one spawn or, with batching enabled, a
+ * `{ context, tasks[] }` envelope. Pick whichever shape the live schema accepts.
+ */
+function taskToolArgs(tool: CursorBridgeTool, toolCallId: string, item: Record<string, unknown>) {
+	try {
+		validateAgentToolArguments(tool, { type: "toolCall", id: toolCallId, name: tool.name, arguments: item });
+		return item;
+	} catch {
+		return { context: "", tasks: [item] };
+	}
 }
 
 async function executeTool(
@@ -635,6 +661,49 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			timeout: timeoutSeconds,
 		});
 		return toolResultMessage;
+	}
+
+	/**
+	 * Cursor background shells run until they exit (dev servers, watchers), so
+	 * the job gets no deadline. Its output auto-delivers when it settles.
+	 */
+	async backgroundShell(args: Parameters<NonNullable<ICursorExecHandlers["backgroundShell"]>>[0]) {
+		const toolCallId = decodeToolCallId(args.toolCallId);
+		return await executeTool(this.options, "bash", toolCallId, {
+			command: args.command,
+			cwd: args.workingDirectory || undefined,
+			async: true,
+			timeout: 0,
+		});
+	}
+
+	async subagent(args: Parameters<NonNullable<ICursorExecHandlers["subagent"]>>[0]) {
+		const toolCallId = decodeToolCallId(args.toolCallId);
+		const toolName = "task";
+		const tool = this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName);
+		if (!tool) return buildUnavailableToolResult(this.options, toolCallId, toolName);
+
+		const item = {
+			name: "CursorTask",
+			agent: CURSOR_SUBAGENT_AGENTS[args.subagentType] ?? "task",
+			task: args.prompt,
+			solutionSpace: "As the task prompt specifies.",
+		};
+		const spawned = await executeTool(this.options, toolName, toolCallId, taskToolArgs(tool, toolCallId, item));
+		const jobId = (spawned.details as { async?: { jobId?: unknown } } | undefined)?.async?.jobId;
+		const manager = this.options.getAsyncJobManager?.();
+		const job = typeof jobId === "string" ? manager?.getJob(jobId) : undefined;
+		if (spawned.isError || !manager || !job) return spawned;
+
+		await job.promise;
+		manager.consumeJobResults([job.id]);
+		const text = job.resultText ?? job.errorText ?? `Subagent ${job.id} ended with status ${job.status}.`;
+		return createToolResultMessage(
+			toolCallId,
+			toolName,
+			{ content: [{ type: "text", text: sanitizeText(text) }], details: { agentId: job.id } },
+			job.status !== "completed",
+		);
 	}
 
 	async shellStream(
