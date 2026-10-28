@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `CursorExecHandlers.backgroundShell` and `CursorExecHandlers.subagent`: Cursor's native background Shell (`block_until_ms: 0`) and Task are answered through the host instead of being rejected as not implemented. A background shell's host job id (`bg_<n>`) becomes Cursor's numeric `shell_id`; a Task is answered with the subagent's final report. Hosts without the handlers still reject both
+
 ### Fixed
 
 - Fixed a cancelled request whose OAuth credential was mid-refresh killing the whole session with `[Unhandled Rejection] AbortError: OAuth refresh ownership aborted by caller` ([#17290](https://github.com/can1357/oh-my-pi/pull/17290) by [@H4vC](https://github.com/H4vC))
